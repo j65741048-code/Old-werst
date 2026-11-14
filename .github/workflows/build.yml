@@ -1,8 +1,9 @@
 # Put this file at: .github/workflows/build.yml
-# It writes the whole Fabric mod (Minecraft 1.21.1) and builds it with Gradle.
+# ARG Mod v2.0.0 (Fabric, Minecraft 1.21.1). It writes the whole mod, generates the
+# NPC skins and the icon, and builds everything with Gradle.
 # Download the jar from the "Artifacts" section of the finished run.
 
-name: Build ARG Mod
+name: Build ARG Mod v2.0.0
 
 on:
   push:
@@ -25,7 +26,11 @@ jobs:
 
       - name: Generate the mod project
         run: |
-          mkdir -p mod/src/main/java/com/argmod mod/src/main/resources
+          mkdir -p mod/src/main/java/com/argmod
+          mkdir -p mod/src/main/resources/assets/argmod/textures/entity
+          mkdir -p mod/src/main/resources/assets/argmod/lang
+          mkdir -p mod/src/main/resources/data/argmod/dimension_type
+          mkdir -p mod/src/main/resources/data/argmod/dimension
 
           cat > mod/settings.gradle <<'EOF'
           pluginManagement {
@@ -43,7 +48,7 @@ jobs:
           yarn_mappings=1.21.1+build.3
           loader_version=0.16.5
           fabric_version=0.102.0+1.21.1
-          mod_version=1.0.0
+          mod_version=2.0.0
           maven_group=com.argmod
           archives_base_name=argmod
           EOF
@@ -91,10 +96,14 @@ jobs:
             "id": "argmod",
             "version": "${version}",
             "name": "ARG Mod",
-            "description": "Chat-talking NPCs that join and leave the world. One of them wants you out.",
+            "description": "Custom NPCs that chat, join and leave a fake multiplayer world. One of them wants you out. Fall into the void and meet the scientists.",
             "authors": ["you"],
+            "icon": "assets/argmod/icon.png",
             "environment": "*",
-            "entrypoints": { "main": ["com.argmod.ArgMod"] },
+            "entrypoints": {
+              "main": ["com.argmod.ArgMod"],
+              "client": ["com.argmod.ArgModClient"]
+            },
             "depends": {
               "fabricloader": ">=0.16.5",
               "minecraft": "~1.21.1",
@@ -104,35 +113,294 @@ jobs:
           }
           EOF
 
+          cat > mod/src/main/resources/assets/argmod/lang/en_us.json <<'EOF'
+          {
+            "entity.argmod.npc": "NPC"
+          }
+          EOF
+
+          # ---- The scientists' lab dimension (empty void, we build the lab with code)
+          cat > mod/src/main/resources/data/argmod/dimension_type/lab.json <<'EOF'
+          {
+            "ultrawarm": false,
+            "natural": false,
+            "coordinate_scale": 1.0,
+            "has_skylight": false,
+            "has_ceiling": true,
+            "ambient_light": 0.6,
+            "fixed_time": 6000,
+            "monster_spawn_light_level": 0,
+            "monster_spawn_block_light_limit": 0,
+            "piglin_safe": false,
+            "bed_works": false,
+            "respawn_anchor_works": false,
+            "has_raids": false,
+            "logical_height": 128,
+            "min_y": 0,
+            "height": 128,
+            "infiniburn": "#minecraft:infiniburn_overworld",
+            "effects": "minecraft:overworld"
+          }
+          EOF
+
+          cat > mod/src/main/resources/data/argmod/dimension/lab.json <<'EOF'
+          {
+            "type": "argmod:lab",
+            "generator": {
+              "type": "minecraft:flat",
+              "settings": {
+                "biome": "minecraft:the_void",
+                "layers": [],
+                "structure_overrides": [],
+                "features": false,
+                "lakes": false
+              }
+            }
+          }
+          EOF
+
+          # ---- Generate NPC skins and the mod icon (pure Python, no libraries needed)
+          cat > gen_assets.py <<'EOF'
+          import zlib, struct
+
+          def write_png(path, w, h, px):
+              raw = b''
+              for y in range(h):
+                  raw += b'\x00'
+                  for x in range(w):
+                      raw += bytes(px(x, y))
+              def chunk(t, d):
+                  c = struct.pack('>I', len(d)) + t + d
+                  return c + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+              data = b'\x89PNG\r\n\x1a\n'
+              data += chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+              data += chunk(b'IDAT', zlib.compress(raw))
+              data += chunk(b'IEND', b'')
+              open(path, 'wb').write(data)
+
+          CLEAR = (0, 0, 0, 0)
+
+          def skin(sk, hair, shirt, pants, eye):
+              def px(x, y):
+                  if y < 16 and x < 32:
+                      if 8 <= x < 16 and 8 <= y < 16:
+                          if y < 10:
+                              return hair + (255,)
+                          if y == 12 and x in (10, 13):
+                              return eye + (255,)
+                          if y == 14 and 10 <= x <= 13:
+                              return (150, 90, 80, 255)
+                          return sk + (255,)
+                      if y < 8 and 8 <= x < 24:
+                          return hair + (255,)
+                      if y >= 8 and (x < 8 or 16 <= x < 32):
+                          return hair + (255,) if y < 10 else sk + (255,)
+                      return CLEAR
+                  if 16 <= y < 32:
+                      if 16 <= x < 40:
+                          return shirt + (255,)
+                      if x < 16:
+                          return pants + (255,)
+                      if 40 <= x < 56:
+                          return shirt + (255,)
+                  if 48 <= y < 64:
+                      if 16 <= x < 32:
+                          return pants + (255,)
+                      if 32 <= x < 48:
+                          return shirt + (255,)
+                  return CLEAR
+              return px
+
+          base = 'mod/src/main/resources/assets/argmod/'
+          skins = {
+              'echo':     ((220, 235, 240), (80, 200, 220), (40, 60, 90), (20, 20, 40), (0, 255, 255)),
+              'guard':    ((200, 160, 130), (35, 35, 40), (70, 75, 85), (50, 55, 65), (255, 60, 60)),
+              'director': ((224, 172, 140), (190, 190, 190), (240, 240, 240), (60, 60, 80), (30, 30, 30)),
+              'v0':       ((224, 172, 140), (90, 60, 30), (60, 120, 200), (50, 50, 110), (30, 30, 30)),
+              'v1':       ((141, 85, 36), (20, 15, 10), (200, 80, 80), (60, 60, 60), (240, 240, 240)),
+              'v2':       ((198, 134, 66), (230, 200, 90), (90, 170, 90), (110, 80, 50), (30, 30, 30)),
+          }
+          for name, c in skins.items():
+              write_png(base + 'textures/entity/npc_' + name + '.png', 64, 64, skin(*c))
+
+          def icon(x, y):
+              if x < 4 or y < 4 or x >= 124 or y >= 124:
+                  return (0, 220, 230, 255)
+              if 56 <= y < 62 and (x // 8) % 2 == 0:
+                  return (255, 60, 120, 255)
+              if y < 56:
+                  g = 90 + (((x // 16) * 7 + (y // 16) * 13) % 5) * 20
+                  return (40, g, 50, 255)
+              if 44 <= x < 84 and 70 <= y < 120:
+                  if x < 48 or x >= 80 or y < 74:
+                      return (200, 255, 255, 255)
+                  return (230, 255, 255, 255) if 58 <= x < 70 else (120, 230, 240, 255)
+              return (15, 18, 30, 255)
+
+          write_png(base + 'icon.png', 128, 128, icon)
+          print('assets generated')
+          EOF
+          python3 gen_assets.py
+
+          # ------------------------------------------------------------------ NpcEntity
+          cat > mod/src/main/java/com/argmod/NpcEntity.java <<'EOF'
+          package com.argmod;
+
+          import net.minecraft.entity.EntityType;
+          import net.minecraft.entity.ai.goal.LookAroundGoal;
+          import net.minecraft.entity.ai.goal.LookAtEntityGoal;
+          import net.minecraft.entity.ai.goal.MeleeAttackGoal;
+          import net.minecraft.entity.ai.goal.WanderAroundGoal;
+          import net.minecraft.entity.attribute.DefaultAttributeContainer;
+          import net.minecraft.entity.attribute.EntityAttributes;
+          import net.minecraft.entity.data.DataTracker;
+          import net.minecraft.entity.data.TrackedData;
+          import net.minecraft.entity.data.TrackedDataHandlerRegistry;
+          import net.minecraft.entity.mob.MobEntity;
+          import net.minecraft.entity.mob.PathAwareEntity;
+          import net.minecraft.entity.player.PlayerEntity;
+          import net.minecraft.world.World;
+
+          /** Our own NPC entity. Looks like a player, skin depends on the "variant". */
+          public class NpcEntity extends PathAwareEntity {
+
+              private static final TrackedData<String> VARIANT =
+                  DataTracker.registerData(NpcEntity.class, TrackedDataHandlerRegistry.STRING);
+
+              /** When true the NPC does not wander off (boss, guards in cutscenes). */
+              public boolean still = false;
+
+              public NpcEntity(EntityType<? extends PathAwareEntity> type, World world) {
+                  super(type, world);
+              }
+
+              public static DefaultAttributeContainer.Builder createAttributes() {
+                  return MobEntity.createMobAttributes()
+                      .add(EntityAttributes.GENERIC_MAX_HEALTH, 20.0)
+                      .add(EntityAttributes.GENERIC_MOVEMENT_SPEED, 0.28)
+                      .add(EntityAttributes.GENERIC_ATTACK_DAMAGE, 2.0)
+                      .add(EntityAttributes.GENERIC_FOLLOW_RANGE, 40.0);
+              }
+
+              @Override
+              protected void initDataTracker(DataTracker.Builder builder) {
+                  super.initDataTracker(builder);
+                  builder.add(VARIANT, "v0");
+              }
+
+              @Override
+              protected void initGoals() {
+                  this.goalSelector.add(1, new MeleeAttackGoal(this, 1.1, true));
+                  this.goalSelector.add(5, new WanderAroundGoal(this, 0.6) {
+                      @Override
+                      public boolean canStart() {
+                          return !NpcEntity.this.still && super.canStart();
+                      }
+                  });
+                  this.goalSelector.add(6, new LookAtEntityGoal(this, PlayerEntity.class, 8.0f));
+                  this.goalSelector.add(7, new LookAroundGoal(this));
+              }
+
+              public String getVariant() {
+                  return this.dataTracker.get(VARIANT);
+              }
+
+              public void setVariant(String v) {
+                  this.dataTracker.set(VARIANT, v);
+              }
+
+              /** NPCs are never saved, so none are left behind after you quit. */
+              @Override
+              public boolean shouldSave() {
+                  return false;
+              }
+
+              @Override
+              public boolean canImmediatelyDespawn(double distanceSquared) {
+                  return false;
+              }
+          }
+          EOF
+
+          # ------------------------------------------------------------------ Client (renderer)
+          cat > mod/src/main/java/com/argmod/ArgModClient.java <<'EOF'
+          package com.argmod;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
+          import net.minecraft.client.render.entity.EntityRendererFactory;
+          import net.minecraft.client.render.entity.MobEntityRenderer;
+          import net.minecraft.client.render.entity.model.EntityModelLayers;
+          import net.minecraft.client.render.entity.model.PlayerEntityModel;
+          import net.minecraft.util.Identifier;
+
+          public class ArgModClient implements ClientModInitializer {
+
+              @Override
+              public void onInitializeClient() {
+                  EntityRendererRegistry.register(ArgMod.NPC, NpcRenderer::new);
+              }
+
+              static class NpcRenderer extends MobEntityRenderer<NpcEntity, PlayerEntityModel<NpcEntity>> {
+                  NpcRenderer(EntityRendererFactory.Context ctx) {
+                      super(ctx, new PlayerEntityModel<>(ctx.getPart(EntityModelLayers.PLAYER), false), 0.5f);
+                  }
+
+                  @Override
+                  public Identifier getTexture(NpcEntity e) {
+                      return Identifier.of("argmod", "textures/entity/npc_" + e.getVariant() + ".png");
+                  }
+              }
+          }
+          EOF
+
+          # ------------------------------------------------------------------ Main mod
           cat > mod/src/main/java/com/argmod/ArgMod.java <<'EOF'
           package com.argmod;
 
+          import com.mojang.authlib.GameProfile;
           import com.mojang.brigadier.arguments.StringArgumentType;
           import net.fabricmc.api.ModInitializer;
           import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+          import net.fabricmc.fabric.api.entity.FakePlayer;
           import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
           import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
           import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
           import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+          import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
           import net.fabricmc.loader.api.FabricLoader;
           import net.minecraft.entity.Entity;
           import net.minecraft.entity.EntityType;
-          import net.minecraft.entity.passive.VillagerEntity;
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.entity.SpawnGroup;
+          import net.minecraft.entity.attribute.EntityAttributeInstance;
+          import net.minecraft.entity.attribute.EntityAttributes;
+          import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
+          import net.minecraft.network.packet.s2c.play.PlayerRemoveS2CPacket;
+          import net.minecraft.registry.Registries;
+          import net.minecraft.registry.Registry;
+          import net.minecraft.registry.RegistryKey;
+          import net.minecraft.registry.RegistryKeys;
           import net.minecraft.server.MinecraftServer;
+          import net.minecraft.server.PlayerManager;
           import net.minecraft.server.command.CommandManager;
+          import net.minecraft.server.command.ServerCommandSource;
           import net.minecraft.server.network.ServerPlayerEntity;
           import net.minecraft.server.world.ServerWorld;
           import net.minecraft.text.ClickEvent;
           import net.minecraft.text.Text;
           import net.minecraft.util.Formatting;
+          import net.minecraft.util.Identifier;
           import net.minecraft.util.WorldSavePath;
           import net.minecraft.world.Heightmap;
+          import net.minecraft.world.World;
 
           import java.io.IOException;
           import java.nio.file.Files;
           import java.nio.file.Path;
           import java.util.ArrayList;
           import java.util.Comparator;
+          import java.util.EnumSet;
           import java.util.HashMap;
           import java.util.Iterator;
           import java.util.LinkedHashMap;
@@ -152,14 +420,18 @@ jobs:
                   Task(int t, Runnable r) { this.t = t; this.r = r; }
               }
 
+              public static EntityType<NpcEntity> NPC;
+              static final RegistryKey<World> LAB_KEY =
+                  RegistryKey.of(RegistryKeys.WORLD, Identifier.of("argmod", "lab"));
+
               static final Random RNG = new Random();
               static final Map<String, Npc> NPCS = new LinkedHashMap<>();
+              static final Map<String, FakePlayer> TAB = new HashMap<>();
               static final List<Task> TASKS = new ArrayList<>();
               static final Map<UUID, Integer> PROGRESS = new HashMap<>();
 
               static final String[] POOL = {"Mara", "Glitch_7", "Kai", "Null", "Wren", "Doll_404", "Sable"};
 
-              // Helper NPC (Echo) story beats. Each one unlocks when you ask about help/escape/truth.
               static final String[] ECHO = {
                   "You can see me? Good. Keep your voice down. The others listen.",
                   "This world is not real. It loops. I have watched you spawn here before.",
@@ -171,12 +443,9 @@ jobs:
                   "help", "escape", "real", "truth", "how", "why", "leave", "who", "where", "what", "out"
               };
               static final String[] ECHO_WHISPER = {
-                  "Not here. Ask me how to get out.",
-                  "They are watching the chat. Choose your words.",
-                  "I can hear you. Keep asking.",
-                  "Time is short. What do you want to know?"
+                  "Not here. Ask me how to get out.", "They are watching the chat. Choose your words.",
+                  "I can hear you. Keep asking.", "Time is short. What do you want to know?"
               };
-
               static final String[] GREET = {
                   "Oh. Hi. Have we met?", "Hello! ...Wait, why am I here?", "Hey. Nice day. Same as yesterday.",
                   "You talk. That is new."
@@ -188,24 +457,47 @@ jobs:
               static final String[] GENERIC = {
                   "I do not remember arriving.", "The sky looks wrong today.", "Did you hear that?",
                   "I keep walking in circles.", "Sometimes the trees repeat.", "What is outside the border?",
-                  "I think I am being written as we speak.", "Shh. Something is listening."
+                  "I think I am being written as we speak.", "Shh. Something is listening.",
+                  "Do not fall. There is something under the world."
               };
               static final String[] LEAVE = {
                   "I have to go. Something is pulling me.", "My script is ending. Goodbye.",
                   "I should not have stayed this long.", "Do not look for me."
               };
+              static final String[] ANGRY = {
+                  "Answer me. How did you break out?", "Why will you not talk?! ANSWER!",
+                  "WHY?! Tell me how you got out!", "I will ask again. HOW did you break out of my simulation?"
+              };
 
               static boolean destroy = false;
               static boolean ending = false;
               static int cooldown = 400;
+              static String bossName = "Director";
 
-              // ---------------------------------------------------------------- init
+              // lab state: 0 none, 1 knocked out, 2 interrogation, 22 ordering guards,
+              // 3 guards attack, 4 guards beaten (/kill boss allowed), 5 boss dead, 6 being sent back
+              static int lab = 0, labT = 0, silence = 0, refusals = 0;
+              static UUID labPlayer;
+              static GameProfile labProfile;
+              static double voidX, voidZ;
+              static Npc boss;
+              static final List<Npc> guards = new ArrayList<>();
+              static boolean labBuilt = false, opGranted = false;
+              static String labDim = "argmod:lab";
+              static int LBX = 0, LBY = 64, LBZ = 0;
+
+              // ================================================================ init
               @Override
               public void onInitialize() {
                   loadConfig();
 
-                  CommandRegistrationCallback.EVENT.register((d, reg, env) -> d.register(
-                      CommandManager.literal("arg").then(CommandManager.literal("ending")
+                  NPC = Registry.register(Registries.ENTITY_TYPE, Identifier.of("argmod", "npc"),
+                      EntityType.Builder.create(NpcEntity::new, SpawnGroup.MISC)
+                          .dimensions(0.6f, 1.8f).maxTrackingRange(10).build("npc"));
+                  FabricDefaultAttributeRegistry.register(NPC, NpcEntity.createAttributes());
+
+                  CommandRegistrationCallback.EVENT.register((d, reg, env) -> {
+                      d.register(CommandManager.literal("arg").then(CommandManager.literal("ending")
                           .then(CommandManager.argument("type", StringArgumentType.word()).executes(c -> {
                               String t = StringArgumentType.getString(c, "type").toLowerCase();
                               if (!t.equals("destroy") && !t.equals("city")) {
@@ -220,7 +512,12 @@ jobs:
                               saveConfig();
                               c.getSource().sendFeedback(() -> Text.literal("Ending chosen: " + t), false);
                               return 1;
-                          })))));
+                          }))));
+
+                      // "/kill Director" - merged into vanilla /kill as an exact word
+                      d.register(CommandManager.literal("kill").then(CommandManager.literal(bossName)
+                          .executes(c -> killBoss(c.getSource()))));
+                  });
 
                   ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
                       ServerPlayerEntity p = handler.player;
@@ -234,6 +531,10 @@ jobs:
                       p.sendMessage(a, false);
                       p.sendMessage(b, false);
                       p.sendMessage(Text.literal("Currently: " + (destroy ? "destroy" : "city")).formatted(Formatting.GRAY), false);
+                      // show NPCs that are already "online" in the tab list
+                      for (FakePlayer fp : TAB.values()) {
+                          try { p.networkHandler.sendPacket(tabAddPacket(fp)); } catch (Throwable ignored) {}
+                      }
                       schedule(160, () -> ensureEcho(server));
                   });
 
@@ -243,10 +544,14 @@ jobs:
                   });
 
                   ServerTickEvents.END_SERVER_TICK.register(ArgMod::tick);
-                  ServerLifecycleEvents.SERVER_STOPPING.register(s -> removeAll(s));
+                  ServerLifecycleEvents.SERVER_STOPPING.register(s -> {
+                      removeAll(s);
+                      removeLabNpcs(s);
+                      revokeOp(s);
+                  });
               }
 
-              // ---------------------------------------------------------------- config
+              // ================================================================ config
               static Path cfgPath() {
                   return FabricLoader.getInstance().getConfigDir().resolve("argmod.properties");
               }
@@ -258,6 +563,8 @@ jobs:
                       if (Files.exists(p)) {
                           try (var in = Files.newInputStream(p)) { pr.load(in); }
                           destroy = pr.getProperty("ending", "city").equalsIgnoreCase("destroy");
+                          String bn = pr.getProperty("boss_name", "Director").replaceAll("[^A-Za-z0-9_]", "");
+                          if (!bn.isEmpty()) bossName = bn;
                       } else {
                           saveConfig();
                       }
@@ -267,12 +574,13 @@ jobs:
               static void saveConfig() {
                   Properties pr = new Properties();
                   pr.setProperty("ending", destroy ? "destroy" : "city");
+                  pr.setProperty("boss_name", bossName);
                   try (var out = Files.newOutputStream(cfgPath())) {
-                      pr.store(out, "ARG mod - ending=destroy (world deleted) or ending=city (safe). Edit before starting the world.");
+                      pr.store(out, "ARG mod - ending=destroy (world deleted) or ending=city (safe). boss_name = one word, used in /kill <boss_name>");
                   } catch (IOException ignored) {}
               }
 
-              // ---------------------------------------------------------------- scheduler + tick
+              // ================================================================ scheduler + tick
               static void schedule(int ticks, Runnable r) {
                   TASKS.add(new Task(ticks, r));
               }
@@ -286,15 +594,46 @@ jobs:
                   for (Task t : due) t.r.run();
 
                   if (ending) return;
+                  if (lab != 0) { labTick(s); return; }
+
                   List<ServerPlayerEntity> ps = s.getPlayerManager().getPlayerList();
                   if (ps.isEmpty()) return;
+
+                  // fell into the void -> the scientists' lab
+                  for (ServerPlayerEntity pl : ps) {
+                      if (!pl.isDead() && pl.getY() < pl.getServerWorld().getBottomY() - 20) {
+                          startLab(s, pl);
+                          return;
+                      }
+                  }
+
                   if (--cooldown <= 0) {
                       cooldown = 600 + RNG.nextInt(900);
                       churn(s, ps.get(0));
                   }
               }
 
-              // ---------------------------------------------------------------- NPC join / leave
+              // ================================================================ helpers
+              static void cmd(MinecraftServer s, String c) {
+                  s.getCommandManager().executeWithPrefix(s.getCommandSource().withSilent(), c);
+              }
+
+              static String labIn() {
+                  return "execute in " + labDim + " run ";
+              }
+
+              static void sleep(long ms) {
+                  try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
+              }
+
+              static void deleteDir(Path root) {
+                  try (var st = Files.walk(root)) {
+                      st.sorted(Comparator.reverseOrder()).forEach(pp -> {
+                          try { Files.deleteIfExists(pp); } catch (IOException ignored) {}
+                      });
+                  } catch (IOException ignored) {}
+              }
+
               static Entity find(MinecraftServer s, UUID id) {
                   for (ServerWorld w : s.getWorlds()) {
                       Entity e = w.getEntity(id);
@@ -311,6 +650,62 @@ jobs:
                   broadcast(s, Text.literal("<" + name + "> " + line));
               }
 
+              static void title(MinecraftServer s, String n, String title, String sub, String color) {
+                  if (sub != null) cmd(s, "title " + n + " subtitle {\"text\":\"" + sub + "\",\"color\":\"gray\"}");
+                  cmd(s, "title " + n + " title {\"text\":\"" + title + "\",\"color\":\"" + color + "\"}");
+              }
+
+              static Npc spawnAt(ServerWorld w, String name, String variant, double x, double y, double z,
+                                 float yaw, boolean helper, boolean invulnerable, boolean still) {
+                  NpcEntity v = NPC.create(w);
+                  if (v == null) return null;
+                  v.refreshPositionAndAngles(x, y, z, yaw, 0f);
+                  v.setCustomName(Text.literal(name));
+                  v.setCustomNameVisible(true);
+                  v.setVariant(variant);
+                  v.setInvulnerable(invulnerable);
+                  v.still = still;
+                  v.setPersistent();
+                  if (variant.equals("guard")) {
+                      EntityAttributeInstance hp = v.getAttributeInstance(EntityAttributes.GENERIC_MAX_HEALTH);
+                      if (hp != null) hp.setBaseValue(14.0);
+                      v.setHealth(14.0f);
+                      EntityAttributeInstance dmg = v.getAttributeInstance(EntityAttributes.GENERIC_ATTACK_DAMAGE);
+                      if (dmg != null) dmg.setBaseValue(3.0);
+                  }
+                  w.spawnEntity(v);
+                  return new Npc(name, v.getUuid(), helper);
+              }
+
+              // ================================================================ fake multiplayer tab list
+              static PlayerListS2CPacket tabAddPacket(FakePlayer fp) {
+                  return new PlayerListS2CPacket(
+                      EnumSet.of(PlayerListS2CPacket.Action.ADD_PLAYER,
+                                 PlayerListS2CPacket.Action.UPDATE_LISTED,
+                                 PlayerListS2CPacket.Action.UPDATE_LATENCY,
+                                 PlayerListS2CPacket.Action.UPDATE_GAME_MODE),
+                      List.<ServerPlayerEntity>of(fp));
+              }
+
+              static void tabAdd(MinecraftServer s, String name) {
+                  try {
+                      GameProfile gp = new GameProfile(UUID.nameUUIDFromBytes(("argmod:" + name).getBytes()), name);
+                      FakePlayer fp = FakePlayer.get(s.getOverworld(), gp);
+                      TAB.put(name, fp);
+                      s.getPlayerManager().sendToAll(tabAddPacket(fp));
+                  } catch (Throwable ignored) {}
+              }
+
+              static void tabRemove(MinecraftServer s, String name) {
+                  try {
+                      FakePlayer fp = TAB.remove(name);
+                      if (fp != null) {
+                          s.getPlayerManager().sendToAll(new PlayerRemoveS2CPacket(List.of(fp.getUuid())));
+                      }
+                  } catch (Throwable ignored) {}
+              }
+
+              // ================================================================ NPC join / leave
               static void spawnNpc(MinecraftServer s, String name, boolean helper, ServerPlayerEntity near) {
                   ServerWorld w = near.getServerWorld();
                   double ang = RNG.nextDouble() * Math.PI * 2;
@@ -318,16 +713,11 @@ jobs:
                   int x = (int) (near.getX() + Math.cos(ang) * dist);
                   int z = (int) (near.getZ() + Math.sin(ang) * dist);
                   int y = w.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
-                  VillagerEntity v = EntityType.VILLAGER.create(w);
-                  if (v == null) return;
-                  v.refreshPositionAndAngles(x + 0.5, y, z + 0.5, RNG.nextFloat() * 360f, 0f);
-                  v.setCustomName(Text.literal(name));
-                  v.setCustomNameVisible(true);
-                  v.setAiDisabled(true);
-                  v.setInvulnerable(true);
-                  v.setPersistent();
-                  w.spawnEntity(v);
-                  NPCS.put(name, new Npc(name, v.getUuid(), helper));
+                  String variant = helper ? "echo" : "v" + RNG.nextInt(3);
+                  Npc n = spawnAt(w, name, variant, x + 0.5, y, z + 0.5, RNG.nextFloat() * 360f, helper, true, false);
+                  if (n == null) return;
+                  NPCS.put(name, n);
+                  tabAdd(s, name);
                   broadcast(s, Text.translatable("multiplayer.player.joined", name).formatted(Formatting.YELLOW));
               }
 
@@ -336,6 +726,7 @@ jobs:
                   if (n == null) return;
                   Entity e = find(s, n.id());
                   if (e != null) e.discard();
+                  tabRemove(s, name);
                   if (announce) {
                       broadcast(s, Text.translatable("multiplayer.player.left", name).formatted(Formatting.YELLOW));
                   }
@@ -346,10 +737,11 @@ jobs:
               }
 
               static void ensureEcho(MinecraftServer s) {
-                  if (ending) return;
+                  if (ending || lab != 0) return;
                   Npc e = NPCS.get("Echo");
                   if (e != null && find(s, e.id()) != null) return;
                   NPCS.remove("Echo");
+                  tabRemove(s, "Echo");
                   List<ServerPlayerEntity> ps = s.getPlayerManager().getPlayerList();
                   if (ps.isEmpty()) return;
                   spawnNpc(s, "Echo", true, ps.get(0));
@@ -375,9 +767,10 @@ jobs:
                   }
               }
 
-              // ---------------------------------------------------------------- chat talking
+              // ================================================================ chat talking
               static void handleChat(MinecraftServer s, ServerPlayerEntity p, String text) {
                   if (ending || text == null) return;
+                  if (lab != 0) { labChat(s, p, text); return; }
                   String low = text.toLowerCase();
 
                   Npc best = null;
@@ -390,10 +783,8 @@ jobs:
                       if ((d <= 256 || (named && d <= 2304)) && d < bd) { best = n; bd = d; }
                   }
                   if (best == null) return;
-
                   final Npc npc = best;
 
-                  // Escape trigger: Echo has told you everything and you say the phrase near it.
                   if (npc.helper() && PROGRESS.getOrDefault(p.getUuid(), 0) >= ECHO.length
                           && low.contains("open the door")) {
                       ending = true;
@@ -428,13 +819,294 @@ jobs:
                   return GENERIC[RNG.nextInt(GENERIC.length)];
               }
 
-              // ---------------------------------------------------------------- endings
-              static void beginEnding(MinecraftServer s, ServerPlayerEntity p) {
-                  if (destroy) destroyWorld(s); else cityEnding(s, p);
+              // ================================================================ the scientists' lab
+              static ServerWorld labWorld(MinecraftServer s) {
+                  return labDim.equals("argmod:lab") ? s.getWorld(LAB_KEY) : s.getOverworld();
               }
 
-              static void cmd(MinecraftServer s, String c) {
-                  s.getCommandManager().executeWithPrefix(s.getCommandSource().withSilent(), c);
+              static void setLab(int st) {
+                  lab = st;
+                  labT = 0;
+              }
+
+              static void startLab(MinecraftServer s, ServerPlayerEntity p) {
+                  ServerWorld lw = s.getWorld(LAB_KEY);
+                  if (lw == null) {
+                      // dimension not available: build the lab far away in the overworld instead
+                      lw = s.getOverworld();
+                      labDim = "minecraft:overworld";
+                      LBX = -25000; LBY = 150; LBZ = -25000;
+                  } else {
+                      labDim = "argmod:lab";
+                      LBX = 0; LBY = 64; LBZ = 0;
+                  }
+                  labPlayer = p.getUuid();
+                  labProfile = p.getGameProfile();
+                  voidX = p.getX();
+                  voidZ = p.getZ();
+                  guards.clear();
+                  boss = null;
+                  silence = 0;
+                  refusals = 0;
+                  setLab(1);
+
+                  buildLab(s, lw);
+                  final String n = p.getName().getString();
+                  cmd(s, "effect give " + n + " minecraft:slow_falling 5 0 true");
+                  cmd(s, labIn() + "tp " + n + " " + (LBX + 0.5) + " " + (LBY + 1) + " " + (LBZ - 8) + " 0 0");
+                  title(s, n, "You fell out of the world", null, "dark_red");
+
+                  Npc g1 = spawnAt(lw, "Guard", "guard", LBX - 6 + 0.5, LBY + 1, LBZ - 9 + 0.5, 270f, false, false, false);
+                  Npc g2 = spawnAt(lw, "Guard", "guard", LBX + 6 + 0.5, LBY + 1, LBZ - 9 + 0.5, 90f, false, false, false);
+                  if (g1 != null) guards.add(g1);
+                  if (g2 != null) guards.add(g2);
+              }
+
+              static void buildLab(MinecraftServer s, ServerWorld lw) {
+                  if (labBuilt) return;
+                  labBuilt = true;
+                  for (int x = LBX - 12; x <= LBX + 12; x += 8)
+                      for (int z = LBZ - 12; z <= LBZ + 12; z += 8) lw.getChunk(x >> 4, z >> 4);
+
+                  String in = labIn();
+                  int bx = LBX, by = LBY, bz = LBZ;
+                  // hall shell, floor, lights, windows
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:white_concrete hollow", bx - 10, by, bz - 10, bx + 10, by + 9, bz + 10));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:light_gray_concrete", bx - 9, by, bz - 9, bx + 9, by, bz + 9));
+                  for (int x = -8; x <= 8; x += 4)
+                      for (int z = -8; z <= 8; z += 4)
+                          cmd(s, in + String.format("setblock %d %d %d minecraft:sea_lantern", bx + x, by + 9, bz + z));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:light_blue_stained_glass", bx - 10, by + 2, bz - 6, bx - 10, by + 5, bz + 6));
+                  // the experiment tank: a tiny blocky world behind glass
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:glass hollow", bx + 4, by + 1, bz + 3, bx + 9, by + 7, bz + 9));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:grass_block", bx + 5, by + 1, bz + 4, bx + 8, by + 1, bz + 8));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:oak_log", bx + 6, by + 2, bz + 6, bx + 6, by + 4, bz + 6));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:oak_leaves", bx + 5, by + 5, bz + 5, bx + 7, by + 5, bz + 7));
+                  // desks and screens
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:smooth_quartz", bx - 9, by + 1, bz + 8, bx - 4, by + 1, bz + 8));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:black_concrete", bx - 9, by + 2, bz + 9, bx - 4, by + 3, bz + 9));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:smooth_quartz", bx - 9, by + 1, bz - 8, bx - 4, by + 1, bz - 8));
+                  cmd(s, in + String.format("fill %d %d %d %d %d %d minecraft:black_concrete", bx - 9, by + 2, bz - 9, bx - 4, by + 3, bz - 9));
+              }
+
+              static void labTick(MinecraftServer s) {
+                  ServerPlayerEntity p = s.getPlayerManager().getPlayer(labPlayer);
+                  if (p == null || p.isDead()) { abortLab(s); return; }
+                  labT++;
+
+                  if (lab == 1) {
+                      if (labT % 10 == 0) {
+                          for (Npc g : guards) {
+                              Entity e = find(s, g.id());
+                              if (e instanceof NpcEntity ge) ge.getNavigation().startMovingTo(p, 1.1);
+                          }
+                      }
+                      if (labT == 70) knockOut(s, p);
+                      if (labT == 190) wakeUp(s, p);
+                  } else if (lab == 2) {
+                      if (labT > 60 && ++silence >= 500) {
+                          silence = 0;
+                          interrogateAngry(s, p);
+                      }
+                      if (refusals > 0 && labT % 10 == 0) chaseBoss(s, p);
+                  } else if (lab == 3) {
+                      if (labT % 20 == 0) {
+                          int alive = 0;
+                          for (Npc g : guards) {
+                              Entity e = find(s, g.id());
+                              if (e instanceof NpcEntity ge && ge.isAlive()) {
+                                  alive++;
+                                  ge.setTarget(p);
+                              }
+                          }
+                          if (alive == 0) guardsBeaten(s, p);
+                      }
+                      if (lab == 3 && labT > 900) sendBack(s, p);
+                  }
+              }
+
+              static void knockOut(MinecraftServer s, ServerPlayerEntity p) {
+                  String n = p.getName().getString();
+                  cmd(s, "effect give " + n + " minecraft:blindness 10 0 true");
+                  cmd(s, "effect give " + n + " minecraft:slowness 10 10 true");
+                  cmd(s, "effect give " + n + " minecraft:nausea 8 0 true");
+                  cmd(s, "playsound minecraft:entity.player.hurt master " + n);
+                  title(s, n, "...", null, "dark_gray");
+                  say(s, "Guard", "Lights out, little builder.");
+              }
+
+              static void wakeUp(MinecraftServer s, ServerPlayerEntity p) {
+                  String n = p.getName().getString();
+                  ServerWorld lw = labWorld(s);
+                  cmd(s, "effect clear " + n);
+                  cmd(s, labIn() + "tp " + n + " " + (LBX + 0.5) + " " + (LBY + 1) + " " + LBZ + " 0 0");
+                  for (int i = 0; i < guards.size(); i++) {
+                      double gx = LBX + (i == 0 ? -3.5 : 3.5);
+                      cmd(s, labIn() + "tp " + guards.get(i).id() + " " + gx + " " + (LBY + 1) + " " + (LBZ - 2));
+                  }
+                  if (lw != null) {
+                      boss = spawnAt(lw, bossName, "director", LBX + 0.5, LBY + 1, LBZ + 7, 180f, false, true, true);
+                  }
+                  setLab(2);
+                  title(s, n, "You wake up.", "Someone is watching you.", "white");
+                  schedule(60, () -> {
+                      if (lab == 2) say(s, bossName, "So. The anomaly wakes. Tell me... how did you break out of my simulation?");
+                  });
+              }
+
+              static void labChat(MinecraftServer s, ServerPlayerEntity p, String text) {
+                  if (lab != 2 || text == null) return;
+                  String low = text.toLowerCase().trim();
+                  int words = low.isEmpty() ? 0 : low.split("\\s+").length;
+                  boolean refuse = words < 3
+                      || low.matches(".*\\b(no|nope|never|nothing|refuse|wont|shut)\\b.*")
+                      || low.contains("won't") || low.contains("not telling")
+                      || low.contains("don't know") || low.contains("dont know");
+                  if (refuse) {
+                      refusals++;
+                      silence = 0;
+                      schedule(15, () -> { if (lab == 2) interrogateAngry(s, p); });
+                  } else {
+                      setLab(22);
+                      schedule(25, () -> say(s, bossName, "Interesting. So that is the flaw in my world."));
+                      schedule(90, () -> say(s, bossName, "Guards! Send them back."));
+                      schedule(130, () -> startGuardAttack(s, p));
+                  }
+              }
+
+              static void interrogateAngry(MinecraftServer s, ServerPlayerEntity p) {
+                  punch(s, p);
+                  say(s, bossName, ANGRY[RNG.nextInt(ANGRY.length)]);
+              }
+
+              static void chaseBoss(MinecraftServer s, ServerPlayerEntity p) {
+                  if (boss == null) return;
+                  Entity e = find(s, boss.id());
+                  if (e instanceof NpcEntity b && b.squaredDistanceTo(p) > 6) {
+                      b.getNavigation().startMovingTo(p, 1.2);
+                  }
+              }
+
+              /** The boss punches, but never hard enough to kill. */
+              static void punch(MinecraftServer s, ServerPlayerEntity p) {
+                  if (boss == null) return;
+                  Entity b = find(s, boss.id());
+                  if (!(b instanceof LivingEntity bl)) return;
+                  if (b.squaredDistanceTo(p) > 16) {
+                      b.refreshPositionAndAngles(p.getX() - 1.5, p.getY(), p.getZ(), 270f, 0f);
+                  }
+                  if (p.getHealth() > 6.0f) {
+                      p.damage(p.getServerWorld().getDamageSources().mobAttack(bl), 2.0f);
+                  }
+                  p.takeKnockback(0.8, b.getX() - p.getX(), b.getZ() - p.getZ());
+                  cmd(s, "playsound minecraft:entity.player.attack.strong master " + p.getName().getString());
+              }
+
+              static void startGuardAttack(MinecraftServer s, ServerPlayerEntity p) {
+                  if (lab != 22) return;
+                  String n = p.getName().getString();
+                  cmd(s, "give " + n + " minecraft:iron_sword");
+                  setLab(3);
+                  for (Npc g : guards) {
+                      Entity e = find(s, g.id());
+                      if (e instanceof NpcEntity ge) ge.setTarget(p);
+                  }
+                  say(s, "Guard", "Move! Orders from the top!");
+              }
+
+              static void guardsBeaten(MinecraftServer s, ServerPlayerEntity p) {
+                  setLab(4);
+                  say(s, bossName, "Impossible... my guards... GUARDS!");
+                  p.sendMessage(Text.literal("The guards are down. Type: /kill " + bossName).formatted(Formatting.GOLD), false);
+                  grantOp(s, p);
+              }
+
+              static void sendBack(MinecraftServer s, ServerPlayerEntity p) {
+                  setLab(6);
+                  String n = p.getName().getString();
+                  cmd(s, "effect give " + n + " minecraft:blindness 8 0 true");
+                  title(s, n, "SENT BACK", null, "red");
+                  say(s, bossName, "Take them back to the world.");
+                  schedule(80, () -> {
+                      removeLabNpcs(s);
+                      revokeOp(s);
+                      ServerWorld ow = s.getOverworld();
+                      int tx = (int) voidX, tz = (int) voidZ;
+                      ow.getChunk(tx >> 4, tz >> 4);
+                      int ty = ow.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, tx, tz);
+                      cmd(s, "execute in minecraft:overworld run tp " + n + " " + tx + " " + (ty + 1) + " " + tz);
+                      cmd(s, "effect clear " + n);
+                      setLab(0);
+                  });
+              }
+
+              static void abortLab(MinecraftServer s) {
+                  removeLabNpcs(s);
+                  revokeOp(s);
+                  setLab(0);
+              }
+
+              static void removeLabNpcs(MinecraftServer s) {
+                  for (Npc g : guards) {
+                      Entity e = find(s, g.id());
+                      if (e != null) e.discard();
+                  }
+                  guards.clear();
+                  if (boss != null) {
+                      Entity e = find(s, boss.id());
+                      if (e != null) e.discard();
+                      boss = null;
+                  }
+              }
+
+              // vanilla /kill needs permission level 2, so the player is made an operator only
+              // while the guards are down, and it is taken back right after.
+              static void grantOp(MinecraftServer s, ServerPlayerEntity p) {
+                  PlayerManager pm = s.getPlayerManager();
+                  GameProfile gp = p.getGameProfile();
+                  if (!pm.isOperator(gp)) {
+                      pm.addToOperators(gp);
+                      opGranted = true;
+                      pm.sendCommandTree(p);
+                  }
+              }
+
+              static void revokeOp(MinecraftServer s) {
+                  if (!opGranted || labProfile == null) return;
+                  PlayerManager pm = s.getPlayerManager();
+                  pm.removeFromOperators(labProfile);
+                  opGranted = false;
+                  ServerPlayerEntity p = pm.getPlayer(labPlayer);
+                  if (p != null) pm.sendCommandTree(p);
+              }
+
+              static int killBoss(ServerCommandSource src) {
+                  MinecraftServer s = src.getServer();
+                  if (lab != 4 || boss == null) {
+                      src.sendError(Text.literal("No entity was found"));
+                      return 0;
+                  }
+                  setLab(5);
+                  ending = true;
+                  say(s, bossName, "No... the experiment... it was never supposed to...");
+                  schedule(40, () -> {
+                      Entity b = find(s, boss.id());
+                      if (b != null) b.kill();
+                  });
+                  schedule(110, () -> {
+                      ServerPlayerEntity p = s.getPlayerManager().getPlayer(labPlayer);
+                      revokeOp(s);
+                      removeLabNpcs(s);
+                      setLab(0);
+                      if (p != null) beginEnding(s, p);
+                  });
+                  return 1;
+              }
+
+              // ================================================================ endings
+              static void beginEnding(MinecraftServer s, ServerPlayerEntity p) {
+                  ending = true;
+                  if (destroy) destroyWorld(s); else cityEnding(s, p);
               }
 
               // Ending 1: the world is destroyed and the save folder is deleted.
@@ -472,19 +1144,17 @@ jobs:
 
                   final int gy = w.getTopY(Heightmap.Type.WORLD_SURFACE, cx, cz) + 2;
 
-                  // clear space, one row at a time (keeps each /fill under the block limit)
                   for (int z = cz - r; z <= cz + r; z++)
-                      cmd(s, String.format("fill %d %d %d %d %d %d minecraft:air", cx - r, gy + 1, z, cx + r, gy + 48, z));
+                      cmd(s, String.format("execute in minecraft:overworld run fill %d %d %d %d %d %d minecraft:air", cx - r, gy + 1, z, cx + r, gy + 48, z));
 
-                  // ground, sidewalks, roads
-                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:gray_concrete", cx - r, gy - 8, cz - r, cx + r, gy - 1, cz + r));
-                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:light_gray_concrete", cx - r, gy, cz - r, cx + r, gy, cz + r));
-                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:black_concrete", cx - 2, gy, cz - r, cx + 2, gy, cz + r));
-                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:black_concrete", cx - r, gy, cz - 2, cx + r, gy, cz + 2));
-                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:yellow_concrete", cx, gy, cz - r, cx, gy, cz + r));
-                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:yellow_concrete", cx - r, gy, cz, cx + r, gy, cz));
+                  String o = "execute in minecraft:overworld run ";
+                  cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:gray_concrete", cx - r, gy - 8, cz - r, cx + r, gy - 1, cz + r));
+                  cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:light_gray_concrete", cx - r, gy, cz - r, cx + r, gy, cz + r));
+                  cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:black_concrete", cx - 2, gy, cz - r, cx + 2, gy, cz + r));
+                  cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:black_concrete", cx - r, gy, cz - 2, cx + r, gy, cz + 2));
+                  cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:yellow_concrete", cx, gy, cz - r, cx, gy, cz + r));
+                  cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:yellow_concrete", cx - r, gy, cz, cx + r, gy, cz));
 
-                  // four glass towers
                   int[] heights = {26, 32, 22, 38};
                   int idx = 0;
                   for (int sx = -1; sx <= 1; sx += 2) {
@@ -492,49 +1162,30 @@ jobs:
                           int h = heights[idx++];
                           int tx = cx + sx * 12, tz = cz + sz * 12;
                           int x1 = tx - 4, x2 = tx + 4, z1 = tz - 4, z2 = tz + 4;
-                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:light_blue_stained_glass hollow", x1, gy + 1, z1, x2, gy + h, z2));
-                          // white corner pillars
+                          cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:light_blue_stained_glass hollow", x1, gy + 1, z1, x2, gy + h, z2));
                           for (int px : new int[]{x1, x2})
                               for (int pz : new int[]{z1, z2})
-                                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:white_concrete", px, gy + 1, pz, px, gy + h, pz));
-                          // roof
-                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:gray_concrete", x1, gy + h, z1, x2, gy + h, z2));
-                          // door on the side facing the main road
+                                  cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:white_concrete", px, gy + 1, pz, px, gy + h, pz));
+                          cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:gray_concrete", x1, gy + h, z1, x2, gy + h, z2));
                           int doorX = sx > 0 ? x1 : x2;
-                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:air", doorX, gy + 1, tz, doorX, gy + 2, tz));
-                          // light inside
-                          cmd(s, String.format("setblock %d %d %d minecraft:sea_lantern", tx, gy + h - 1, tz));
+                          cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:air", doorX, gy + 1, tz, doorX, gy + 2, tz));
+                          cmd(s, o + String.format("setblock %d %d %d minecraft:sea_lantern", tx, gy + h - 1, tz));
                       }
                   }
 
-                  // street lamps
                   for (int t = -20; t <= 20; t += 8) {
                       for (int side : new int[]{-3, 3}) {
-                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:iron_bars", cx + side, gy + 1, cz + t, cx + side, gy + 4, cz + t));
-                          cmd(s, String.format("setblock %d %d %d minecraft:sea_lantern", cx + side, gy + 5, cz + t));
+                          cmd(s, o + String.format("fill %d %d %d %d %d %d minecraft:iron_bars", cx + side, gy + 1, cz + t, cx + side, gy + 4, cz + t));
+                          cmd(s, o + String.format("setblock %d %d %d minecraft:sea_lantern", cx + side, gy + 5, cz + t));
                       }
                   }
 
                   cmd(s, "time set day");
                   cmd(s, "weather clear");
-                  cmd(s, String.format("tp %s %d %d %d", name, cx, gy + 1, cz + 6));
-                  cmd(s, String.format("spawnpoint %s %d %d %d", name, cx, gy + 1, cz + 6));
-                  cmd(s, "title " + name + " title {\"text\":\"You escaped.\",\"color\":\"green\"}");
-                  cmd(s, "title " + name + " subtitle {\"text\":\"Welcome to the real world.\",\"color\":\"gray\"}");
+                  cmd(s, "execute in minecraft:overworld run tp " + name + " " + cx + " " + (gy + 1) + " " + (cz + 6));
+                  cmd(s, "execute in minecraft:overworld run spawnpoint " + name + " " + cx + " " + (gy + 1) + " " + (cz + 6));
+                  title(s, name, "You escaped.", "Welcome to the real world.", "green");
                   schedule(100, () -> say(s, "Echo", "You made it out. Do not look back."));
-              }
-
-              // ---------------------------------------------------------------- helpers
-              static void sleep(long ms) {
-                  try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
-              }
-
-              static void deleteDir(Path root) {
-                  try (var st = Files.walk(root)) {
-                      st.sorted(Comparator.reverseOrder()).forEach(pp -> {
-                          try { Files.deleteIfExists(pp); } catch (IOException ignored) {}
-                      });
-                  } catch (IOException ignored) {}
               }
           }
           EOF
@@ -546,7 +1197,7 @@ jobs:
       - name: Upload the mod jar
         uses: actions/upload-artifact@v4
         with:
-          name: argmod
+          name: argmod-2.0.0
           path: |
             mod/build/libs/*.jar
             !mod/build/libs/*-sources.jar
