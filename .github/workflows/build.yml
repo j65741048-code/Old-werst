@@ -1,34 +1,552 @@
-name: Build Infinite Rails Mod
+# Put this file at: .github/workflows/build.yml
+# It writes the whole Fabric mod (Minecraft 1.21.1) and builds it with Gradle.
+# Download the jar from the "Artifacts" section of the finished run.
+
+name: Build ARG Mod
 
 on:
-  workflow_dispatch:
   push:
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infinite-rails
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'
+          distribution: temurin
+          java-version: 21
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Generate the mod project
+        run: |
+          mkdir -p mod/src/main/java/com/argmod mod/src/main/resources
+
+          cat > mod/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'argmod'
+          EOF
+
+          cat > mod/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.1
+          yarn_mappings=1.21.1+build.3
+          loader_version=0.16.5
+          fabric_version=0.102.0+1.21.1
+          mod_version=1.0.0
+          maven_group=com.argmod
+          archives_base_name=argmod
+          EOF
+
+          cat > mod/build.gradle <<'EOF'
+          plugins {
+              id 'fabric-loom' version '1.7-SNAPSHOT'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          java {
+              withSourcesJar()
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF
+
+          cat > mod/src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "argmod",
+            "version": "${version}",
+            "name": "ARG Mod",
+            "description": "Chat-talking NPCs that join and leave the world. One of them wants you out.",
+            "authors": ["you"],
+            "environment": "*",
+            "entrypoints": { "main": ["com.argmod.ArgMod"] },
+            "depends": {
+              "fabricloader": ">=0.16.5",
+              "minecraft": "~1.21.1",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat > mod/src/main/java/com/argmod/ArgMod.java <<'EOF'
+          package com.argmod;
+
+          import com.mojang.brigadier.arguments.StringArgumentType;
+          import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+          import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+          import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+          import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
+          import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+          import net.fabricmc.loader.api.FabricLoader;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.entity.EntityType;
+          import net.minecraft.entity.passive.VillagerEntity;
+          import net.minecraft.server.MinecraftServer;
+          import net.minecraft.server.command.CommandManager;
+          import net.minecraft.server.network.ServerPlayerEntity;
+          import net.minecraft.server.world.ServerWorld;
+          import net.minecraft.text.ClickEvent;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Formatting;
+          import net.minecraft.util.WorldSavePath;
+          import net.minecraft.world.Heightmap;
+
+          import java.io.IOException;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.ArrayList;
+          import java.util.Comparator;
+          import java.util.HashMap;
+          import java.util.Iterator;
+          import java.util.LinkedHashMap;
+          import java.util.List;
+          import java.util.Map;
+          import java.util.Properties;
+          import java.util.Random;
+          import java.util.UUID;
+
+          public class ArgMod implements ModInitializer {
+
+              record Npc(String name, UUID id, boolean helper) {}
+
+              static class Task {
+                  int t;
+                  Runnable r;
+                  Task(int t, Runnable r) { this.t = t; this.r = r; }
+              }
+
+              static final Random RNG = new Random();
+              static final Map<String, Npc> NPCS = new LinkedHashMap<>();
+              static final List<Task> TASKS = new ArrayList<>();
+              static final Map<UUID, Integer> PROGRESS = new HashMap<>();
+
+              static final String[] POOL = {"Mara", "Glitch_7", "Kai", "Null", "Wren", "Doll_404", "Sable"};
+
+              // Helper NPC (Echo) story beats. Each one unlocks when you ask about help/escape/truth.
+              static final String[] ECHO = {
+                  "You can see me? Good. Keep your voice down. The others listen.",
+                  "This world is not real. It loops. I have watched you spawn here before.",
+                  "The others come and go because they are scripts. I am the only one that stays.",
+                  "There is a seam in the sky. I can open it, but only if you trust me.",
+                  "Last thing. Stay close to me and say: open the door."
+              };
+              static final String[] ECHO_KEYS = {
+                  "help", "escape", "real", "truth", "how", "why", "leave", "who", "where", "what", "out"
+              };
+              static final String[] ECHO_WHISPER = {
+                  "Not here. Ask me how to get out.",
+                  "They are watching the chat. Choose your words.",
+                  "I can hear you. Keep asking.",
+                  "Time is short. What do you want to know?"
+              };
+
+              static final String[] GREET = {
+                  "Oh. Hi. Have we met?", "Hello! ...Wait, why am I here?", "Hey. Nice day. Same as yesterday.",
+                  "You talk. That is new."
+              };
+              static final String[] WARN = {
+                  "Do not trust Echo.", "Echo is lying to you. Probably.", "Leave Echo alone. Please.",
+                  "Echo has been here too long. Something is wrong with it."
+              };
+              static final String[] GENERIC = {
+                  "I do not remember arriving.", "The sky looks wrong today.", "Did you hear that?",
+                  "I keep walking in circles.", "Sometimes the trees repeat.", "What is outside the border?",
+                  "I think I am being written as we speak.", "Shh. Something is listening."
+              };
+              static final String[] LEAVE = {
+                  "I have to go. Something is pulling me.", "My script is ending. Goodbye.",
+                  "I should not have stayed this long.", "Do not look for me."
+              };
+
+              static boolean destroy = false;
+              static boolean ending = false;
+              static int cooldown = 400;
+
+              // ---------------------------------------------------------------- init
+              @Override
+              public void onInitialize() {
+                  loadConfig();
+
+                  CommandRegistrationCallback.EVENT.register((d, reg, env) -> d.register(
+                      CommandManager.literal("arg").then(CommandManager.literal("ending")
+                          .then(CommandManager.argument("type", StringArgumentType.word()).executes(c -> {
+                              String t = StringArgumentType.getString(c, "type").toLowerCase();
+                              if (!t.equals("destroy") && !t.equals("city")) {
+                                  c.getSource().sendError(Text.literal("Use: /arg ending destroy  or  /arg ending city"));
+                                  return 0;
+                              }
+                              if (ending) {
+                                  c.getSource().sendError(Text.literal("Too late. The ending already started."));
+                                  return 0;
+                              }
+                              destroy = t.equals("destroy");
+                              saveConfig();
+                              c.getSource().sendFeedback(() -> Text.literal("Ending chosen: " + t), false);
+                              return 1;
+                          })))));
+
+                  ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+                      ServerPlayerEntity p = handler.player;
+                      Text a = Text.literal("[1] World destroyed (deleted)").styled(st ->
+                          st.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/arg ending destroy"))
+                            .withColor(Formatting.RED));
+                      Text b = Text.literal("[2] Modern city (safe)").styled(st ->
+                          st.withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/arg ending city"))
+                            .withColor(Formatting.AQUA));
+                      p.sendMessage(Text.literal("Choose your ending before you talk to anyone:").formatted(Formatting.GOLD), false);
+                      p.sendMessage(a, false);
+                      p.sendMessage(b, false);
+                      p.sendMessage(Text.literal("Currently: " + (destroy ? "destroy" : "city")).formatted(Formatting.GRAY), false);
+                      schedule(160, () -> ensureEcho(server));
+                  });
+
+                  ServerMessageEvents.CHAT_MESSAGE.register((msg, sender, params) -> {
+                      MinecraftServer s = sender.getServer();
+                      if (s != null) handleChat(s, sender, msg.getSignedContent());
+                  });
+
+                  ServerTickEvents.END_SERVER_TICK.register(ArgMod::tick);
+                  ServerLifecycleEvents.SERVER_STOPPING.register(s -> removeAll(s));
+              }
+
+              // ---------------------------------------------------------------- config
+              static Path cfgPath() {
+                  return FabricLoader.getInstance().getConfigDir().resolve("argmod.properties");
+              }
+
+              static void loadConfig() {
+                  Properties pr = new Properties();
+                  Path p = cfgPath();
+                  try {
+                      if (Files.exists(p)) {
+                          try (var in = Files.newInputStream(p)) { pr.load(in); }
+                          destroy = pr.getProperty("ending", "city").equalsIgnoreCase("destroy");
+                      } else {
+                          saveConfig();
+                      }
+                  } catch (IOException ignored) {}
+              }
+
+              static void saveConfig() {
+                  Properties pr = new Properties();
+                  pr.setProperty("ending", destroy ? "destroy" : "city");
+                  try (var out = Files.newOutputStream(cfgPath())) {
+                      pr.store(out, "ARG mod - ending=destroy (world deleted) or ending=city (safe). Edit before starting the world.");
+                  } catch (IOException ignored) {}
+              }
+
+              // ---------------------------------------------------------------- scheduler + tick
+              static void schedule(int ticks, Runnable r) {
+                  TASKS.add(new Task(ticks, r));
+              }
+
+              static void tick(MinecraftServer s) {
+                  List<Task> due = new ArrayList<>();
+                  for (Iterator<Task> it = TASKS.iterator(); it.hasNext(); ) {
+                      Task t = it.next();
+                      if (--t.t <= 0) { due.add(t); it.remove(); }
+                  }
+                  for (Task t : due) t.r.run();
+
+                  if (ending) return;
+                  List<ServerPlayerEntity> ps = s.getPlayerManager().getPlayerList();
+                  if (ps.isEmpty()) return;
+                  if (--cooldown <= 0) {
+                      cooldown = 600 + RNG.nextInt(900);
+                      churn(s, ps.get(0));
+                  }
+              }
+
+              // ---------------------------------------------------------------- NPC join / leave
+              static Entity find(MinecraftServer s, UUID id) {
+                  for (ServerWorld w : s.getWorlds()) {
+                      Entity e = w.getEntity(id);
+                      if (e != null) return e;
+                  }
+                  return null;
+              }
+
+              static void broadcast(MinecraftServer s, Text t) {
+                  s.getPlayerManager().broadcast(t, false);
+              }
+
+              static void say(MinecraftServer s, String name, String line) {
+                  broadcast(s, Text.literal("<" + name + "> " + line));
+              }
+
+              static void spawnNpc(MinecraftServer s, String name, boolean helper, ServerPlayerEntity near) {
+                  ServerWorld w = near.getServerWorld();
+                  double ang = RNG.nextDouble() * Math.PI * 2;
+                  double dist = 5 + RNG.nextInt(6);
+                  int x = (int) (near.getX() + Math.cos(ang) * dist);
+                  int z = (int) (near.getZ() + Math.sin(ang) * dist);
+                  int y = w.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+                  VillagerEntity v = EntityType.VILLAGER.create(w);
+                  if (v == null) return;
+                  v.refreshPositionAndAngles(x + 0.5, y, z + 0.5, RNG.nextFloat() * 360f, 0f);
+                  v.setCustomName(Text.literal(name));
+                  v.setCustomNameVisible(true);
+                  v.setAiDisabled(true);
+                  v.setInvulnerable(true);
+                  v.setPersistent();
+                  w.spawnEntity(v);
+                  NPCS.put(name, new Npc(name, v.getUuid(), helper));
+                  broadcast(s, Text.translatable("multiplayer.player.joined", name).formatted(Formatting.YELLOW));
+              }
+
+              static void removeNpc(MinecraftServer s, String name, boolean announce) {
+                  Npc n = NPCS.remove(name);
+                  if (n == null) return;
+                  Entity e = find(s, n.id());
+                  if (e != null) e.discard();
+                  if (announce) {
+                      broadcast(s, Text.translatable("multiplayer.player.left", name).formatted(Formatting.YELLOW));
+                  }
+              }
+
+              static void removeAll(MinecraftServer s) {
+                  for (String n : new ArrayList<>(NPCS.keySet())) removeNpc(s, n, false);
+              }
+
+              static void ensureEcho(MinecraftServer s) {
+                  if (ending) return;
+                  Npc e = NPCS.get("Echo");
+                  if (e != null && find(s, e.id()) != null) return;
+                  NPCS.remove("Echo");
+                  List<ServerPlayerEntity> ps = s.getPlayerManager().getPlayerList();
+                  if (ps.isEmpty()) return;
+                  spawnNpc(s, "Echo", true, ps.get(0));
+              }
+
+              static void churn(MinecraftServer s, ServerPlayerEntity p) {
+                  Npc echo = NPCS.get("Echo");
+                  if (echo == null || find(s, echo.id()) == null) { ensureEcho(s); return; }
+
+                  List<Npc> amb = new ArrayList<>();
+                  for (Npc n : NPCS.values()) if (!n.helper()) amb.add(n);
+
+                  boolean join = amb.isEmpty() || (amb.size() < 3 && RNG.nextBoolean());
+                  if (join) {
+                      List<String> free = new ArrayList<>();
+                      for (String n : POOL) if (!NPCS.containsKey(n)) free.add(n);
+                      if (free.isEmpty()) return;
+                      spawnNpc(s, free.get(RNG.nextInt(free.size())), false, p);
+                  } else {
+                      Npc n = amb.get(RNG.nextInt(amb.size()));
+                      say(s, n.name(), LEAVE[RNG.nextInt(LEAVE.length)]);
+                      schedule(40, () -> removeNpc(s, n.name(), true));
+                  }
+              }
+
+              // ---------------------------------------------------------------- chat talking
+              static void handleChat(MinecraftServer s, ServerPlayerEntity p, String text) {
+                  if (ending || text == null) return;
+                  String low = text.toLowerCase();
+
+                  Npc best = null;
+                  double bd = Double.MAX_VALUE;
+                  for (Npc n : NPCS.values()) {
+                      Entity e = find(s, n.id());
+                      if (e == null || e.getWorld() != p.getWorld()) continue;
+                      double d = e.squaredDistanceTo(p);
+                      boolean named = low.contains(n.name().toLowerCase());
+                      if ((d <= 256 || (named && d <= 2304)) && d < bd) { best = n; bd = d; }
+                  }
+                  if (best == null) return;
+
+                  final Npc npc = best;
+
+                  // Escape trigger: Echo has told you everything and you say the phrase near it.
+                  if (npc.helper() && PROGRESS.getOrDefault(p.getUuid(), 0) >= ECHO.length
+                          && low.contains("open the door")) {
+                      ending = true;
+                      schedule(30, () -> say(s, "Echo", "Close your eyes."));
+                      schedule(90, () -> beginEnding(s, p));
+                      return;
+                  }
+
+                  final String line = npc.helper() ? echoReply(p, low) : ambientReply(low);
+                  schedule(20 + RNG.nextInt(30), () -> {
+                      if (NPCS.containsKey(npc.name())) say(s, npc.name(), line);
+                  });
+              }
+
+              static String echoReply(ServerPlayerEntity p, String m) {
+                  int n = PROGRESS.getOrDefault(p.getUuid(), 0);
+                  if (n >= ECHO.length) return "Say it when you are ready: open the door.";
+                  boolean hit = false;
+                  for (String k : ECHO_KEYS) if (m.contains(k)) { hit = true; break; }
+                  if (!hit) return ECHO_WHISPER[RNG.nextInt(ECHO_WHISPER.length)];
+                  PROGRESS.put(p.getUuid(), n + 1);
+                  return ECHO[n];
+              }
+
+              static String ambientReply(String m) {
+                  if (m.contains("echo") || m.contains("escape") || m.contains("leave")) {
+                      return WARN[RNG.nextInt(WARN.length)];
+                  }
+                  if (m.contains("hi") || m.contains("hello") || m.contains("hey")) {
+                      return GREET[RNG.nextInt(GREET.length)];
+                  }
+                  return GENERIC[RNG.nextInt(GENERIC.length)];
+              }
+
+              // ---------------------------------------------------------------- endings
+              static void beginEnding(MinecraftServer s, ServerPlayerEntity p) {
+                  if (destroy) destroyWorld(s); else cityEnding(s, p);
+              }
+
+              static void cmd(MinecraftServer s, String c) {
+                  s.getCommandManager().executeWithPrefix(s.getCommandSource().withSilent(), c);
+              }
+
+              // Ending 1: the world is destroyed and the save folder is deleted.
+              static void destroyWorld(MinecraftServer s) {
+                  String[] lines = {
+                      "The sky is coming apart.", "Everyone you met is gone.",
+                      "It was never going to let you leave.", "Goodbye."
+                  };
+                  cmd(s, "effect give @a minecraft:darkness 30 0 true");
+                  for (int i = 0; i < lines.length; i++) {
+                      final String l = lines[i];
+                      schedule(i * 50, () -> broadcast(s, Text.literal(l).formatted(Formatting.DARK_RED, Formatting.OBFUSCATED)));
+                  }
+                  schedule(220, () -> {
+                      removeAll(s);
+                      final Path root = s.getSavePath(WorldSavePath.ROOT).toAbsolutePath().normalize();
+                      Runtime.getRuntime().addShutdownHook(new Thread(() -> deleteDir(root)));
+                      new Thread(() -> {
+                          while (s.isRunning()) sleep(500);
+                          for (int i = 0; i < 8; i++) { sleep(3000); deleteDir(root); }
+                      }).start();
+                      s.stop(false);
+                  });
+              }
+
+              // Ending 2: safe. Build a modern city, move the player there, make it their spawn.
+              static void cityEnding(MinecraftServer s, ServerPlayerEntity p) {
+                  final String name = p.getName().getString();
+                  removeAll(s);
+                  ServerWorld w = s.getOverworld();
+                  final int cx = 25000, cz = 25000, r = 24;
+
+                  for (int x = cx - r; x <= cx + r; x += 8)
+                      for (int z = cz - r; z <= cz + r; z += 8) w.getChunk(x >> 4, z >> 4);
+
+                  final int gy = w.getTopY(Heightmap.Type.WORLD_SURFACE, cx, cz) + 2;
+
+                  // clear space, one row at a time (keeps each /fill under the block limit)
+                  for (int z = cz - r; z <= cz + r; z++)
+                      cmd(s, String.format("fill %d %d %d %d %d %d minecraft:air", cx - r, gy + 1, z, cx + r, gy + 48, z));
+
+                  // ground, sidewalks, roads
+                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:gray_concrete", cx - r, gy - 8, cz - r, cx + r, gy - 1, cz + r));
+                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:light_gray_concrete", cx - r, gy, cz - r, cx + r, gy, cz + r));
+                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:black_concrete", cx - 2, gy, cz - r, cx + 2, gy, cz + r));
+                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:black_concrete", cx - r, gy, cz - 2, cx + r, gy, cz + 2));
+                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:yellow_concrete", cx, gy, cz - r, cx, gy, cz + r));
+                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:yellow_concrete", cx - r, gy, cz, cx + r, gy, cz));
+
+                  // four glass towers
+                  int[] heights = {26, 32, 22, 38};
+                  int idx = 0;
+                  for (int sx = -1; sx <= 1; sx += 2) {
+                      for (int sz = -1; sz <= 1; sz += 2) {
+                          int h = heights[idx++];
+                          int tx = cx + sx * 12, tz = cz + sz * 12;
+                          int x1 = tx - 4, x2 = tx + 4, z1 = tz - 4, z2 = tz + 4;
+                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:light_blue_stained_glass hollow", x1, gy + 1, z1, x2, gy + h, z2));
+                          // white corner pillars
+                          for (int px : new int[]{x1, x2})
+                              for (int pz : new int[]{z1, z2})
+                                  cmd(s, String.format("fill %d %d %d %d %d %d minecraft:white_concrete", px, gy + 1, pz, px, gy + h, pz));
+                          // roof
+                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:gray_concrete", x1, gy + h, z1, x2, gy + h, z2));
+                          // door on the side facing the main road
+                          int doorX = sx > 0 ? x1 : x2;
+                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:air", doorX, gy + 1, tz, doorX, gy + 2, tz));
+                          // light inside
+                          cmd(s, String.format("setblock %d %d %d minecraft:sea_lantern", tx, gy + h - 1, tz));
+                      }
+                  }
+
+                  // street lamps
+                  for (int t = -20; t <= 20; t += 8) {
+                      for (int side : new int[]{-3, 3}) {
+                          cmd(s, String.format("fill %d %d %d %d %d %d minecraft:iron_bars", cx + side, gy + 1, cz + t, cx + side, gy + 4, cz + t));
+                          cmd(s, String.format("setblock %d %d %d minecraft:sea_lantern", cx + side, gy + 5, cz + t));
+                      }
+                  }
+
+                  cmd(s, "time set day");
+                  cmd(s, "weather clear");
+                  cmd(s, String.format("tp %s %d %d %d", name, cx, gy + 1, cz + 6));
+                  cmd(s, String.format("spawnpoint %s %d %d %d", name, cx, gy + 1, cz + 6));
+                  cmd(s, "title " + name + " title {\"text\":\"You escaped.\",\"color\":\"green\"}");
+                  cmd(s, "title " + name + " subtitle {\"text\":\"Welcome to the real world.\",\"color\":\"gray\"}");
+                  schedule(100, () -> say(s, "Echo", "You made it out. Do not look back."));
+              }
+
+              // ---------------------------------------------------------------- helpers
+              static void sleep(long ms) {
+                  try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
+              }
+
+              static void deleteDir(Path root) {
+                  try (var st = Files.walk(root)) {
+                      st.sorted(Comparator.reverseOrder()).forEach(pp -> {
+                          try { Files.deleteIfExists(pp); } catch (IOException ignored) {}
+                      });
+                  } catch (IOException ignored) {}
+              }
+          }
+          EOF
 
       - name: Build with Gradle
-        run: ./gradlew build
+        working-directory: mod
+        run: gradle build --no-daemon
 
-      - name: Upload Mod JAR
+      - name: Upload the mod jar
         uses: actions/upload-artifact@v4
         with:
-          name: infinite-rails-mod
-          path: infinite-rails/build/libs/*.jar
+          name: argmod
+          path: |
+            mod/build/libs/*.jar
+            !mod/build/libs/*-sources.jar
