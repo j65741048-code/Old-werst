@@ -1,0 +1,47 @@
+modLoader = "javafml"
+loaderVersion = "[2,)"
+license = "MIT"
+
+[[mods]]
+modId = "infiniterails"
+version = "0.1.0"
+displayName = "Infinite Rails: Villager Traffic"
+description = '''
+An endless double-track Create railway with switches, signals, sidings and stations.
+Loconautics trains driven by villagers run on it, with an adjustable (or device-adaptive) traffic limit.
+'''
+
+[[dependencies.infiniterails]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.infiniterails]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.22)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.infiniterails]]
+modId = "create"
+type = "required"
+versionRange = "[6.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.infiniterails]]
+modId = "loconautics"
+type = "required"
+versionRange = "[0.1,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.infiniterails]]
+modId = "sable"
+type = "required"
+versionRange = "[2.0,)"
+ordering = "AFTER"
+side = "BOTH"

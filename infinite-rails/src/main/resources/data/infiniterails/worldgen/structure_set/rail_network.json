@@ -1,0 +1,9 @@
+{
+  "structures": [ { "structure": "infiniterails:rail_network", "weight": 1 } ],
+  "placement": {
+    "type": "minecraft:random_spread",
+    "spacing": 12,
+    "separation": 11,
+    "salt": 20261114
+  }
+}
